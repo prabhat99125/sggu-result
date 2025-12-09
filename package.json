@@ -9,9 +9,11 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "cheerio": "^1.1.2",
     "next": "16.0.7",
     "react": "19.2.0",
-    "react-dom": "19.2.0"
+    "react-dom": "19.2.0",
+    "request": "^2.88.2"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
