@@ -4,212 +4,183 @@ import * as cheerio from "cheerio";
 import fs from "fs";
 import path from "path";
 
-// --------------------- HTML FETCH WITH RETRY ---------------------
+// --------------------- FETCH HTML ---------------------
 async function fetchHtml(url: string): Promise<string> {
     return new Promise((resolve, reject) => {
         https.get(url, { rejectUnauthorized: false }, (res) => {
             let html = "";
-            res.on("data", (chunk) => (html += chunk));
+            res.on("data", chunk => html += chunk);
             res.on("end", () => resolve(html));
-            res.on("error", (err) => reject(err));
+            res.on("error", err => reject(err));
         });
     });
 }
 
-async function fetchHtmlWithRetry(url: string, retries = 3, delay = 1500): Promise<string> {
-    for (let attempt = 1; attempt <= retries; attempt++) {
+async function fetchWithRetry(url: string, retry = 3): Promise<string> {
+    for (let a = 1; a <= retry; a++) {
         try {
             return await fetchHtml(url);
-        } catch (err: any) {
-            if (attempt === retries) throw err;
-            console.warn(`Retry ${attempt} for ${url} after error: ${err.message}`);
-            await new Promise((res) => setTimeout(res, delay));
+        } catch (e: any) {
+            if (a === retry) throw e;
+            await new Promise(res => setTimeout(res, 1000));
         }
     }
     return "";
 }
 
-// --------------------- PARSE HTML FUNCTION ---------------------
+// --------------------- PARSE HTML ---------------------
 function parseHtml(html: string) {
     const $ = cheerio.load(html);
 
-    let seatNo = $("td:contains('Seat No')").next().text().trim();
-    let spId = $("td:contains('SP ID')").next().text().trim();
-
     const studentInfo: any = {
-        seatNo: seatNo ? Number(seatNo) : null,
-        spId: spId ? Number(spId) : null,
+        seatNo: Number($("td:contains('Seat No')").next().text().trim()) || null,
+        spId: Number($("td:contains('SP ID')").next().text().trim()) || null,
         enrolment: $("td:contains('Enrolment / PG Registration No')").next().text().trim(),
         collegeName: $("td:contains('College Name')").next().text().trim(),
         studentName: $("td:contains('Student Name')").next().text().trim(),
         examName: $("td:contains('Exam Name')").next().text().trim(),
     };
 
-    const allEmpty = Object.values(studentInfo).every((v) => !v);
+    const allEmpty = Object.values(studentInfo).every(v => !v);
 
     const semester: any = { totalMarks: null, marks: [] };
-    const headerCols: string[] = [];
+    const headers: string[] = [];
 
-    // Get header row
-    $("#mytbl tr").first().find("td").each((_, col) => {
-        headerCols.push($(col).text().trim());
+    $("#mytbl tr").first().find("td").each((_, c) => {
+        headers.push($(c).text().trim());
     });
 
-    // Process remaining rows
     $("#mytbl tr").slice(1).each((_, row) => {
-        const cols = $(row).find("td");
-        const subjectObj: any = {};
+        const tds = $(row).find("td");
+        const record: any = {};
 
-        cols.each((idx, col) => {
-            const key = headerCols[idx] || `col${idx}`;
-            const value = $(col).text().trim();
+        tds.each((idx, col) => {
+            const key = headers[idx] || `col${idx}`;
+            const val = $(col).text().trim();
 
             if (
-                value &&
+                val &&
                 !key.toLowerCase().includes("pass") &&
-                !key.toLowerCase().includes("total") &&
-                !key.toLowerCase().includes("gl") &&
                 !key.toLowerCase().includes("gp") &&
+                !key.toLowerCase().includes("gl") &&
+                !key.toLowerCase().includes("total") &&
                 !key.toLowerCase().includes("credit")
             ) {
-                subjectObj[key] = isNaN(Number(value)) ? value : Number(value);
+                record[key] = isNaN(Number(val)) ? val : Number(val);
             }
         });
 
-        if (Object.keys(subjectObj).length > 0) semester.marks.push(subjectObj);
+        if (Object.keys(record).length) semester.marks.push(record);
     });
 
-    const totalMarksText = $("td:contains('Total Marks')").text() || "";
-    const match = totalMarksText.match(/\/\s*(\d+)/);
+    const totalText = $("td:contains('Total Marks')").text();
+    const match = totalText.match(/\/\s*(\d+)/);
     semester.totalMarks = match ? Number(match[1]) : null;
 
     return { studentInfo, semester, allEmpty };
 }
 
-// --------------------- SAVE JSON WITH DYNAMIC SEM ---------------------
-function saveJsonWithSem(newData: any) {
-    const folderPath = path.join(process.cwd(), "bca");
-    if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
+// --------------------- SAVE JSON (i → filename) ---------------------
+function saveJson(i: number, newData: any) {
+    const folder = path.join(process.cwd(), "result");
+    if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
 
-    const filePath = path.join(folderPath, "2023.json");
+    const file = path.join(folder, `${i}.json`);
 
-    let oldData: any[] = [];
-    if (fs.existsSync(filePath)) {
-        const content = fs.readFileSync(filePath, "utf8");
-        if (content.trim() !== "") oldData = JSON.parse(content);
+    let old: any[] = [];
+    if (fs.existsSync(file)) {
+        const txt = fs.readFileSync(file, "utf8");
+        if (txt.trim()) old = JSON.parse(txt);
     }
 
-    const { studentInfo, semester } = newData;
-    if (!studentInfo.spId) return filePath;
+    // Append without checking anything
+    old.push(newData);
 
-    const index = oldData.findIndex((s) => s.spId === studentInfo.spId);
-
-    if (index === -1) {
-        // First time student
-        oldData.push({ ...studentInfo, sem1: semester });
-    } else {
-        const student = oldData[index];
-        let semNum = 1;
-
-        // Find next available semester
-        while (student[`sem${semNum}`]) {
-            const oldMarks = JSON.stringify(student[`sem${semNum}`].marks);
-            const newMarks = JSON.stringify(semester.marks);
-
-            if (oldMarks === newMarks && student[`sem${semNum}`].totalMarks === semester.totalMarks) {
-                return filePath; // Same semester, skip
-            }
-            semNum++;
-        }
-
-        student[`sem${semNum}`] = semester; // Add new semester
-        oldData[index] = student;
-    }
-
-    fs.writeFileSync(filePath, JSON.stringify(oldData, null, 2), "utf8");
-    return filePath;
+    fs.writeFileSync(file, JSON.stringify(old, null, 2));
 }
 
-// --------------------- HISTORY MANAGEMENT ---------------------
-const historyFile = path.join(process.cwd(), "bca", "history.json");
+// --------------------- HISTORY ---------------------
+const histFile = path.join(process.cwd(), "history.json");
 
-function loadHistory(): { i: number; j: number } {
-    if (fs.existsSync(historyFile)) {
-        const content = fs.readFileSync(historyFile, "utf8");
-        if (content.trim() !== "") return JSON.parse(content);
+function readHist() {
+    if (fs.existsSync(histFile)) {
+        return JSON.parse(fs.readFileSync(histFile, "utf8"));
     }
     return { i: 1, j: 1 };
 }
 
-function saveHistory(i: number, j: number) {
-    fs.writeFileSync(historyFile, JSON.stringify({ i, j }, null, 2), "utf8");
+function writeHist(i: number, j: number) {
+    fs.writeFileSync(histFile, JSON.stringify({ i, j }, null, 2));
 }
 
-// --------------------- HANDLE UNCUGHT EXCEPTIONS ---------------------
-process.on("uncaughtException", (err: any) => {
-    if (err.code === "ECONNRESET") {
-        console.warn("Connection reset by server, continuing...");
-    } else {
-        console.error("Unhandled exception:", err);
+// --------------------- PROCESS BATCH ---------------------
+async function processBatch(i: number, startJ: number, batchSize = 20) {
+    const tasks = [];
+
+    for (let j = startJ; j < startJ + batchSize; j++) {
+        const url = `https://ums.sgguerp.in/Result/StudentResultDisplay.aspx?HtmlURL=${i},${j}`;
+        tasks.push({ url, j });
     }
-});
 
-// --------------------- MAIN API ROUTE ---------------------
-export async function GET() {
-    const finalResults: any[] = [];
-    let stopLoop = 1;
+    let emptyCount = 0;
 
-    let { i: startI, j: startJ } = loadHistory();
-
-    for (let i = startI; ; i++) {
-        for (let j = i === startI ? startJ : 1; ; j++) {
-            const url = `https://ums.sgguerp.in/Result/StudentResultDisplay.aspx?HtmlURL=${i},${j}`;
-
+    const results = await Promise.all(
+        tasks.map(async (item) => {
             try {
-                const html = await fetchHtmlWithRetry(url, 3, 1500);
+                const html = await fetchWithRetry(item.url);
 
                 if (html.includes("Result Not Found!") || html.trim() === "") {
-                    stopLoop++;
-                    finalResults.push({ url, status: "empty" });
-                } else {
-                    const parsed = parseHtml(html);
-
-                    if (parsed.allEmpty) {
-                        stopLoop++;
-                        finalResults.push({ url, status: "empty" });
-                    } else {
-                        stopLoop = 1;
-                        saveJsonWithSem(parsed); // auto sem increment
-                        finalResults.push({
-                            url,
-                            status: "saved",
-                            student: parsed.studentInfo.studentName || "Unknown",
-                        });
-                    }
+                    emptyCount++;
+                    return { ...item, status: "empty" };
                 }
 
-                saveHistory(i, j);
-                await new Promise((res) => setTimeout(res, 500));
+                const parsed = parseHtml(html);
 
-                if (stopLoop >= 10) break;
-            } catch (err: any) {
-                finalResults.push({ url, status: "failed", error: String(err) });
-                saveHistory(i, j);
+                if (parsed.allEmpty) {
+                    emptyCount++;
+                    return { ...item, status: "empty" };
+                }
+
+                // Save result to file named by current i
+                saveJson(i, parsed);
+
+                return { ...item, status: "saved" };
+
+            } catch (e) {
+                return { ...item, status: "error" };
             }
+        })
+    );
 
-            if (stopLoop >= 10) break;
+    const lastJ = startJ + batchSize - 1;
+    writeHist(i, lastJ);
+
+    return { results, emptyCount };
+}
+
+// --------------------- MAIN API ---------------------
+export async function GET() {
+    let { i, j } = readHist();
+    const finalOutput: any[] = [];
+
+    while (true) {
+        const batch = await processBatch(i, j, 20);
+
+        finalOutput.push(...batch.results);
+
+        if (batch.emptyCount >= 10) {
+            i++;
+            j = 1;
+        } else {
+            j += 20;
         }
 
-        if (stopLoop >= 10) {
-            stopLoop = 1;
-            continue;
-        }
+        await new Promise(res => setTimeout(res, 300));
     }
 
     return NextResponse.json({
         success: true,
-        message: "Loop completed with full resume & dynamic semester support!",
-        processed: finalResults.length,
-        file: "bca/2023.json",
+        message: "Scraper running!",
+        processed: finalOutput.length
     });
 }

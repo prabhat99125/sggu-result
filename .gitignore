@@ -2,7 +2,8 @@
 
 # dependencies
 /node_modules
-/bca
+/result
+/history.json
 /.pnp
 .pnp.*
 .yarn/*
